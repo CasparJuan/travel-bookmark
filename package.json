@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --test tests/caption.test.mjs"
   },
   "dependencies": {
     "@line/bot-sdk": "^10.6.0",

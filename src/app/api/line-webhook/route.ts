@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
 import { createClient } from "@supabase/supabase-js";
 import { detectPlatform, platformEmoji, placeTypeEmoji } from "@/lib/utils";
+import { cleanCaption, extractPlaceName } from "@/lib/caption";
 
 const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET || "";
 const CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
@@ -64,35 +65,6 @@ function guessPlaceType(text: string): string | null {
   return null;
 }
 
-// Try to extract a place/shop name from caption text
-// Looks for patterns like "店名 XX店/廳/館" or short standalone names
-function extractPlaceName(caption: string): string | null {
-  if (!caption) return null;
-
-  // Pattern 1: Look for text ending with common place suffixes
-  // e.g., "羊燒味 溫體羊肉專賣店", "老宅咖啡廳", "XX燒烤店"
-  const suffixPattern = /([^\s，,。！!？?、\n]{2,15}(?:店|廳|館|堂|舍|居|屋|坊|軒|閣|苑|齋|號|樓|亭|寮|小吃|食堂|餐廳|咖啡|酒吧|旅館|民宿|飯店))/g;
-  const suffixMatches = caption.match(suffixPattern);
-  if (suffixMatches) {
-    // Pick the longest match as it's likely the full name
-    const best = suffixMatches.sort((a, b) => b.length - a.length)[0];
-    // Clean up leading filler words
-    return best.replace(/^[的在是有個一這那去到了也都很超好最]/, '').trim();
-  }
-
-  // Pattern 2: Look for quoted names「XX」or【XX】
-  const quotedMatch = caption.match(/[「【]([^」】]{2,20})[」】]/);
-  if (quotedMatch) return quotedMatch[1];
-
-  // Pattern 3: If the caption is short enough (≤15 chars), it might be the name itself
-  const firstLine = caption.split(/[\n\r]/)[0].trim();
-  if (firstLine.length <= 15 && !/[？?！!]/.test(firstLine)) {
-    return firstLine;
-  }
-
-  return null;
-}
-
 // Fetch OG meta from URL for auto-classification
 async function fetchOgMeta(url: string): Promise<{ title: string | null; description: string | null; placeName: string | null; imageUrl: string | null }> {
   try {
@@ -110,21 +82,20 @@ async function fetchOgMeta(url: string): Promise<{ title: string | null; descrip
     const titleTag = html.match(/<title[^>]*>([^<]*)<\/title>/);
 
     // Clean up IG-style titles
-    let rawTitle = ogTitle?.[1] || titleTag?.[1] || null;
+    let rawTitle = cleanCaption(ogTitle?.[1] || titleTag?.[1] || null);
     if (rawTitle) {
-      rawTitle = rawTitle.replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)));
-      rawTitle = rawTitle.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-
       const igMatch = rawTitle.match(/在 Instagram[：:]\s*["""]?(.+)/) || rawTitle.match(/on Instagram[：:]\s*["""]?(.+)/);
       if (igMatch) {
         rawTitle = igMatch[1].replace(/["""]\s*$/, '');
       }
     }
 
+    // description 刻意保留原文：handleUrl 會把 title 與 description 併起來再一次 cleanCaption()，
+    // 這樣「og:title 就是文案第一行」造成的重複才偵測得到。
     const rawDesc = ogDesc?.[1] || null;
 
     // Try to extract actual place name from title + description
-    const combined = [rawTitle, rawDesc].filter(Boolean).join(" ");
+    const combined = [rawTitle, cleanCaption(rawDesc)].filter(Boolean).join(" ");
     const placeName = extractPlaceName(combined);
 
     // For display: truncate rawTitle
@@ -160,7 +131,7 @@ async function handleUrl(url: string, extraText: string, replyToken: string) {
 
   // 2. Fetch OG meta for more info
   const og = await fetchOgMeta(url);
-  const ogCombined = [og.title, og.description].filter(Boolean).join(" ");
+  const ogCombined = [og.title, cleanCaption(og.description)].filter(Boolean).join(" ");
 
   // 3. Determine title: user text > extracted place name > OG title
   let title: string | null = cleanText || null;
@@ -168,9 +139,11 @@ async function handleUrl(url: string, extraText: string, replyToken: string) {
     title = og.placeName;
   }
   // Store full OG caption as description (even if we extracted a place name from it)
-  const description = og.title && og.title !== title
-    ? og.title + (og.description ? `\n${og.description}` : '')
-    : og.description || null;
+  const description = cleanCaption(
+    og.title && og.title !== title
+      ? og.title + (og.description ? `\n${og.description}` : '')
+      : og.description || null
+  );
 
   // Try to extract city/placeType from OG meta if not found in user text
   if (!city) {
@@ -194,8 +167,12 @@ async function handleUrl(url: string, extraText: string, replyToken: string) {
   });
 
   if (error) {
+    console.error("[line-webhook] insert_bookmark_from_bot failed:", error);
+    const hint = error.message?.includes("fetch failed")
+      ? "\n連不到資料庫，可能是 Supabase 專案被暫停了"
+      : "";
     await replyMessage(replyToken, [
-      { type: "text", text: `❌ 儲存失敗：${error.message}` },
+      { type: "text", text: `❌ 儲存失敗：${error.message}${hint}` },
     ]);
     return;
   }
