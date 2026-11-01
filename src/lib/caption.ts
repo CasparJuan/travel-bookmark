@@ -6,18 +6,29 @@
  * 兩個問題：
  *   ① numeric HTML entity 沒還原 → 中文全變成 &#x53f0; 這種東西，店名和縣市都比對不到
  *   ② 前面黏著一段 likes / comments / 帳號 / 日期的殼，那不是文案
+ *
+ * ⚠️ 文案來自使用者傳來的任意網址，內容不可信。這裡的 regex 不能有會互相重疊的
+ * 連續量詞（例如 \s*X?\s*），否則一長串空白就會造成平方級回溯、卡死 webhook。
+ * tests/caption.test.mjs 有對應的對抗輸入測試。
  */
 
 /** 英文版 IG 殼：「583 likes, 23 comments - handle on March 26, 2026: "」 */
 const IG_SHELL_EN =
-  /^[ \t]*[\d.,]+\s*[KkMm]?\s*likes?\s*,\s*[\d.,]+\s*[KkMm]?\s*comments?\s*[-–—]\s*.{1,120}?\s+on\s+[A-Za-z]+\s+\d{1,2},\s*\d{4}\s*:\s*["“«]?/gm;
+  /^[ \t]*[\d.,]+\s*(?:[KkMm]\s*)?likes?\s*,\s*[\d.,]+\s*(?:[KkMm]\s*)?comments?\s*[-–—]\s*\S.{0,119}?\s+on\s+[A-Za-z]+\s+\d{1,2},\s*\d{4}\s*:\s*["“«]?/gm;
 
 /** 繁中版 IG 殼：「583 個讚，23 則留言 - handle 於 2026 年 3 月 26 日：「」 */
 const IG_SHELL_ZH =
-  /^[ \t]*[\d.,]+\s*[KkMm]?\s*個讚\s*[，,]\s*[\d.,]+\s*[KkMm]?\s*則留言\s*[-–—]\s*.{1,120}?於\s*\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日\s*[：:]\s*[「"“]?/gm;
+  /^[ \t]*[\d.,]+\s*(?:[KkMm]\s*)?個讚\s*[，,]\s*[\d.,]+\s*(?:[KkMm]\s*)?則留言\s*[-–—]\s*\S.{0,119}?於\s*\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日\s*[：:]\s*[「"“]?/gm;
 
-/** 文案結尾被平台補上的收尾引號（"." 或 」。） */
-const IG_TAIL = /\s*["”»」]\s*\.?\s*$/;
+/** 去掉文案結尾被平台補上的收尾引號（"." 或 」）；沒有引號就原樣回傳 */
+function stripClosingQuote(s: string): string {
+  let end = s.trimEnd();
+  if (end.endsWith(".")) end = end.slice(0, -1).trimEnd();
+  return /["”»」]$/.test(end) ? end.slice(0, -1) : s;
+}
+
+/** 店名來源文字的長度上限。店名本身最多 30 字，夠用，也限制下面 regex 的輸入大小 */
+const MAX_NAME_SOURCE = 200;
 
 /**
  * 解 HTML entity（含 &#x53f0; 這種 numeric 形式）。
@@ -57,13 +68,14 @@ export function cleanCaption(text: string | null | undefined): string | null {
 
   let s = decodeEntities(text);
   s = s.replace(IG_SHELL_EN, "").replace(IG_SHELL_ZH, "");
-  s = s.replace(IG_TAIL, "");
+  s = stripClosingQuote(s);
 
   // 存進 DB 的描述是「og:title 換行 og:description」，而 og:title 就是文案第一行，
   // 剝完殼之後同一句會連著出現兩次 → 把重複的第一行拿掉。
   const lines = s.split("\n");
   if (lines.length >= 2) {
-    const head = lines[0].trim().replace(/[.… ]+$/, "");
+    // 下面只比前 12 字，先截短，避免整行都是句點時回溯
+    const head = lines[0].trim().slice(0, 64).replace(/[.… ]+$/, "");
     const next = lines[1].trim();
     if (head.length >= 6 && next.startsWith(head.slice(0, Math.min(head.length, 12)))) {
       lines.shift();
@@ -99,6 +111,7 @@ const EDGE_SYMBOLS = /^[\s:：|｜\-–—~～·•.,，。、]+|[\s:：|｜\-�
 /** 把「📍」或「店名：」後面的文字清成店名；看起來不是店名就回 null */
 function cleanPlaceName(raw: string): string | null {
   const name = raw
+    .slice(0, MAX_NAME_SOURCE)
     .replace(/[@＠][\w.]+/g, "")
     .replace(/[#＃]\S*/g, "")
     .replace(/[\p{Extended_Pictographic}️‍]/gu, "")

@@ -77,6 +77,36 @@ test("looksLikeAddress covers common address shapes", () => {
   }
 });
 
+test("cleanCaption strips the closing quote only when one is there", () => {
+  assert.equal(cleanCaption(`文案內容" . `), "文案內容");
+  assert.equal(cleanCaption(`文案內容」`), "文案內容");
+  assert.equal(cleanCaption("文案內容."), "文案內容.");
+});
+
+test("IG shells with a handle are still stripped", () => {
+  assert.equal(cleanCaption(`583 likes, 23 comments - 77_____eat on March 26, 2026: "好吃"`), "好吃");
+  assert.equal(cleanCaption(`1.2K likes, 3 comments - a.b on March 26, 2026: "好吃"`), "好吃");
+  assert.equal(cleanCaption(`583 個讚，23 則留言 - 77_____eat 於 2026 年 3 月 26 日：「好吃」`), "好吃");
+});
+
+// webhook 會抓使用者傳來的任意網址，文案內容不可信；這些輸入曾讓 regex 平方級回溯
+test("adversarial captions do not cause regex backtracking", () => {
+  const n = 25_000;
+  const spaces = " ".repeat(n);
+  const cases = {
+    "tail whitespace": () => cleanCaption(`a${spaces}x`),
+    "shell after digits": () => cleanCaption(`1${spaces}x`),
+    "shell after dash": () => cleanCaption(`1 likes, 1 comments - ${spaces}x`),
+    "first line dots": () => cleanCaption(`ab${".".repeat(n)}x\nnext`),
+    "📍 edge symbols": () => extractPlaceName(`📍a${"-".repeat(n)}x`),
+  };
+  for (const [label, run] of Object.entries(cases)) {
+    const start = performance.now();
+    run();
+    assert.ok(performance.now() - start < 100, label);
+  }
+});
+
 test("existing rules still work", () => {
   assert.equal(extractPlaceName("推薦 老宅咖啡廳 真的讚"), "老宅咖啡廳");
   assert.equal(extractPlaceName("週末去吃了「阿明的家」真的很不錯，下次還要再來一次"), "阿明的家");
